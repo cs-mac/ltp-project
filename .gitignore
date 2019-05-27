@@ -1,0 +1,7 @@
+.vscode
+.venv
+Pipfile
+Pipfile.lock
+
+# External dependencies
+ud-treebanks-v2.4
