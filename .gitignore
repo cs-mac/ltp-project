@@ -3,5 +3,6 @@
 Pipfile
 Pipfile.lock
 
-# External dependencies
+# Downloaded dependencies
 ud-treebanks-v2.4
+bilstm-aux

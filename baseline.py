@@ -59,6 +59,8 @@ loss_function = nn.NLLLoss()
 optimizer = optim.SGD(model.parameters(), lr=0.1)
 
 for epoch in range(300):
+    epoch_loss = 0
+
     for sent, tags in training_data:
         model.zero_grad()
 
@@ -67,9 +69,12 @@ for epoch in range(300):
 
         tag_scores = model(sent_in)
         loss = loss_function(tag_scores, targets)
+        epoch_loss += loss.item()
 
         loss.backward()
         optimizer.step()
+
+    print('Epoch {} loss: {}'.format(epoch, epoch_loss))
 
 
 # Evaluate results
