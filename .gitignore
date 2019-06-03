@@ -2,6 +2,7 @@
 .venv
 Pipfile
 Pipfile.lock
+data
 
 # Downloaded dependencies
 ud-treebanks-v2.4
