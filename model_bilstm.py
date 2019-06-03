@@ -41,6 +41,7 @@ def data_maker(file_path: str):
     Returns a tuple containing the words with their corresponding POS-tags
     from the UD-dataset
     '''
+    training_data = []
     with open(file_path, 'r') as conllu_file:
         for annotation in  lazy_parse(conllu_file.read()):
             annotation = [x for x in annotation if x["id"] is not None]
@@ -48,7 +49,8 @@ def data_maker(file_path: str):
             pos_tags = [x["upostag"] for x in annotation]
             #print(f'Sentence =\n{words}\n{pos_tags}\n')
             #print(f'Sentence =\n{len(words)}\n{len(pos_tags)}\n')
-            return (sentences, pos_tags)
+            training_data.append((sentences, pos_tags))
+    return training_data
 
 args = parse_arguments()
 if not args.input:
