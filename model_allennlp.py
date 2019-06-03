@@ -47,7 +47,7 @@ from allennlp.data.iterators import BasicIterator
 from allennlp.nn import util as nn_util
 from allennlp.data.token_indexers.elmo_indexer import ELMoCharacterMapper, ELMoTokenCharactersIndexer
 
-torch.manual_seed(1)  
+torch.manual_seed(1)
 
 def lazy_parse(text: str, fields: Tuple[str, ...]=DEFAULT_FIELDS):
     for sentence in text.split("\n\n"):
@@ -80,7 +80,7 @@ class UniversalDependenciesDatasetReader(DatasetReader):
                 yield self.text_to_instance(words, pos_tags)
 
     @overrides
-    def text_to_instance(self, 
+    def text_to_instance(self,
                          words: List[str],
                          upos_tags: List[str] = None) -> Instance:
 
@@ -127,21 +127,21 @@ class LstmTagger(Model):
 
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         return {"accuracy": self.accuracy.get_metric(reset)}
- 
+
 
 def tonp(tsr): return tsr.detach().cpu().numpy()
- 
+
 class Predictor:
     def __init__(self, model: Model, iterator: DataIterator,
                  cuda_device: int=-1) -> None:
         self.model = model
         self.iterator = iterator
         self.cuda_device = cuda_device
-         
+
     def _extract_data(self, batch) -> np.ndarray:
         out_dict = self.model(**batch)
         return expit(tonp(out_dict["tag_logits"]))
-     
+
     def predict(self, ds: Iterable[Instance]) -> np.ndarray:
         pred_generator = self.iterator(ds, num_epochs=1, shuffle=False)
         self.model.eval()
@@ -151,7 +151,7 @@ class Predictor:
         with torch.no_grad():
             for batch in pred_generator_tqdm:
                 batch = nn_util.move_to_device(batch, self.cuda_device)
-                preds.append(self._extract_data(batch))               
+                preds.append(self._extract_data(batch))
         return np.concatenate(preds, axis=0)
 
 
@@ -164,17 +164,17 @@ if __name__ == "__main__":
         elif sys.argv[1] == "elmo":
             params = Params.from_file('config/model_configuration_elmo.jsonnet')
             token_ind = {"elmo": ELMoTokenCharactersIndexer()}
-        elif sys.argv[1] == "bert":        
+        elif sys.argv[1] == "bert":
             params = Params.from_file('config/model_configuration_bert.jsonnet')
     except IndexError:
         print("No argument given: using base model! \nPossible arguments are 'base', 'elmo' or 'bert'")
         params = Params.from_file('config/model_configuration.jsonnet')
 
-    # Remove a saved model, when the model is going to run again    
+    # Remove a saved model, when the model is going to run again
     try:
         shutil.rmtree("created_model")
     except FileNotFoundError:
-        pass 
+        pass
 
     print("\n###################### STARTING ############################\n")
 
@@ -186,10 +186,10 @@ if __name__ == "__main__":
     seq_iterator.index_with(model.vocab)
 
     predictor = Predictor(model, seq_iterator)
-    if token_ind: 
-        reader = UniversalDependenciesDatasetReader(token_ind) 
+    if token_ind:
+        reader = UniversalDependenciesDatasetReader(token_ind)
     else:
-        reader = UniversalDependenciesDatasetReader() 
+        reader = UniversalDependenciesDatasetReader()
 
     # Maybe try changing predictor in such a way the reader is not a necessary step here, but just the file will do
     tag_logits = predictor.predict(reader.read("ud-treebanks-v2.4/UD_English-ParTUT/en_partut-ud-dev.conllu"))

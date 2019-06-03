@@ -13,6 +13,7 @@ from conllu.parser import parse_line, DEFAULT_FIELDS
 from typing import Iterator, List, Dict, Tuple, Iterable
 
 from allennlp.modules.elmo import Elmo, batch_to_ids
+from itertools import chain
 
 torch.manual_seed(673)
 
@@ -43,7 +44,16 @@ def data_maker(file_path: str):
             pos_tags = [x["upostag"] for x in annotation]
             #print(f'Sentence =\n{words}\n{pos_tags}\n')
             #print(f'Sentence =\n{len(words)}\n{len(pos_tags)}\n')
-            return sentences, pos_tags
+            yield (sentences, pos_tags)
+
+
+def data_completinator(file):
+    '''
+    Chain independent sentence/postag generators to one big generator
+    for given input
+    '''
+    return chain(data_maker(file))
+
 
 def to_elmo(sentences):
     '''
@@ -82,19 +92,21 @@ class LSTMTagger(nn.Module):
         scores = F.log_softmax(x, dim=1)
         return scores
 
-def main(sentences, pos_tags, elmo_embeddings):
+def main(training_data, elmo_embeddings):
+    print(training_data)
     # Load data
-    training_data = [
-        ('The dog ate the apple'.split(), ['DET', 'NN', 'V', 'DET', 'NN']),
-        ('Everybody read that book'.split(), ['NN', 'V', 'DET', 'NN'])
-    ]
-    training_data = (sentences, pos_tags)
+    # training_data = [
+    #     ('The dog ate the apple'.split(), ['DET', 'NN', 'V', 'DET', 'NN']),
+    #     ('Everybody read that book'.split(), ['NN', 'V', 'DET', 'NN'])
+    # ]
 
     vocab = list(set([word for sent, _ in training_data for word in sent]))
     word_to_ix = {word: ix for ix, word in enumerate(vocab)}
 
     tagset = ['DET', 'NN', 'V']
+    tagset = list(set([tag for _, tags in training_data for tag in tags]))
     tag_to_ix = {tag: ix for ix, tag in enumerate(tagset)}
+    print(tagset)
 
 
     # Define model
@@ -138,6 +150,8 @@ if __name__ == "__main__":
         print("Please provide an input filename")
     else:
         # data_maker(args.input)
-        sentences, pos_tags = data_maker(args.input)
-        elmo_embeddings = to_elmo(sentences)
-        main(sentences, pos_tags, elmo_embeddings)
+        training_data = data_completinator(args.input)
+        for tuple in training_data:
+            print(tuple)
+        #elmo_embeddings = ""# = to_elmo(training_data[0])
+        #main(training_data, elmo_embeddings)
