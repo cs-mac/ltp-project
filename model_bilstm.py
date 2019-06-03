@@ -10,14 +10,82 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
 
+import argparse
+
+from conllu.parser import parse_line, DEFAULT_FIELDS
+from typing import Tuple
+
+from allennlp.modules.elmo import Elmo, batch_to_ids
+
 torch.manual_seed(673)
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='POS-tags using neural network')
+    parser.add_argument('--input', metavar='FILE', help='File containing UD dependencies')
+    return parser.parse_args()
+
+
+def lazy_parse(text: str, fields: Tuple[str, ...]=DEFAULT_FIELDS):
+    '''
+    Parses a conllu file
+    '''
+    for sentence in text.split("\n\n"):
+        if sentence:
+            yield [parse_line(line, fields)
+                   for line in sentence.split("\n")
+                   if line and not line.strip().startswith("#")]
 
 # Load data
-training_data = [
-    ('The dog ate the apple'.split(), ['DET', 'NN', 'V', 'DET', 'NN']),
-    ('Everybody read that book'.split(), ['NN', 'V', 'DET', 'NN'])
-]
+def data_maker(file_path: str):
+    '''
+    Returns a tuple containing the words with their corresponding POS-tags
+    from the UD-dataset
+    '''
+    with open(file_path, 'r') as conllu_file:
+        for annotation in  lazy_parse(conllu_file.read()):
+            annotation = [x for x in annotation if x["id"] is not None]
+            sentences = [x["form"] for x in annotation]
+            pos_tags = [x["upostag"] for x in annotation]
+            #print(f'Sentence =\n{words}\n{pos_tags}\n')
+            #print(f'Sentence =\n{len(words)}\n{len(pos_tags)}\n')
+            return (sentences, pos_tags)
+
+args = parse_arguments()
+if not args.input:
+    print("Please provide an input filename")
+else:
+    training_data = data_maker(args.input)
+
+# training_data = [
+#     ('The dog ate the apple'.split(), ['DET', 'NN', 'V', 'DET', 'NN']),
+#     ('Everybody read that book'.split(), ['NN', 'V', 'DET', 'NN'])
+# ]
+
+# Prepare ELMo embeddings
+def to_elmo(sentences):
+    '''
+    Use elmo pre-trained word embeddings
+    '''
+    options_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
+    weight_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
+
+    elmo = Elmo(options_file, weight_file, 2, dropout=0)
+
+    sentences = [sentence for sentence in sentences]
+    character_ids = batch_to_ids(sentences)
+
+    embeddings = elmo(character_ids)
+    return embeddings
+
+
+elmo_embeddings = to_elmo(sentences)
+
+
+# Prepare data
+def prepare_sequence(seq, to_ix):
+    idxs = [to_ix[w] for w in seq]
+    return torch.tensor(idxs, dtype=torch.long)
+
 
 
 def create_value_map(vals):
