@@ -52,9 +52,9 @@ def conllu_reader(file_path):
 
 def data_maker_bert(data):
     '''
-    Transform data using BERT Wordpieces, and the [CLS], [SEP] and [IGNORE] tags
+    Transform data using BERT Wordpieces, and [CLS], [SEP] tags
     '''    
-    tokenizer = BertTokenizer.from_pretrained('bert-base-cased', do_basic_tokenize=False)
+    tokenizer = BertTokenizer.from_pretrained('bert-large-cased', do_basic_tokenize=False)
     
     for sentence, tags in data:
         tok_sentence = []
@@ -66,7 +66,7 @@ def data_maker_bert(data):
                 corrected_tags.append(tag)
                 for i in range(1, len(tokenized_text)):
                     tok_sentence.append([tokenized_text[i]])
-                    corrected_tags.append('[IGNORE]')
+                    corrected_tags.append('<IGN>')
             else:
                 tok_sentence.append(tokenized_text)
                 corrected_tags.append(tag)

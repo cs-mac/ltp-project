@@ -66,7 +66,7 @@ def data_maker_bert(data):
     Returns a tuple containing the words with their corresponding POS-tags
     from the UD-dataset for BERT
     '''    
-    tokenizer = BertTokenizer.from_pretrained('bert-base-cased', do_basic_tokenize=False)
+    tokenizer = BertTokenizer.from_pretrained('bert-large-cased', do_basic_tokenize=False)
     
     for sentence, tags in data:
         tok_sentence = []
@@ -78,7 +78,7 @@ def data_maker_bert(data):
                 corrected_tags.append(tag)
                 for i in range(1, len(tokenized_text)):
                     tok_sentence.append([tokenized_text[i]])
-                    corrected_tags.append('[IGNORE]')
+                    corrected_tags.append('<IGN>')
             else:
                 tok_sentence.append(tokenized_text)
                 corrected_tags.append(tag)
@@ -181,6 +181,6 @@ if __name__ == "__main__":
     else:
         # data_maker(args.input)
         training_data = data_completinator(args.input)
-        to_bert(training_data)
+        data_maker_bert(training_data)
         #elmo_embeddings = ""# = to_elmo(training_data[0])
         #main(training_data, elmo_embeddings)
