@@ -15,7 +15,7 @@ from typing import Iterator, List, Dict, Tuple, Iterable
 from allennlp.modules.elmo import Elmo, batch_to_ids
 from itertools import chain
 
-from pytorch_pretrained_bert import BertTokenizer, BertModel, BertForMaskedLM, BasicTokenizer, WordpieceTokenizer
+from pytorch_pretrained_bert import BertTokenizer, BertModel, BertForMaskedLM
 
 # OPTIONAL: if you want to have more information on what's happening, activate the logger as follows
 import logging
@@ -61,41 +61,28 @@ def data_completinator(file):
     return chain(data_maker(file))
 
 
-def to_bert(data):
-    #WHAT TO DO WITH [SEP]?????????????????????????????????????????????????????
-    # Load pre-trained model tokenizer (vocabulary)
-    tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
-    # Tokenized input
-    #text = "[CLS] Who was Jim Henson ? [SEP] Jim Henson was a puppeteer [SEP]"
-    #tokenized_text = tokenizer.tokenize(text)
-    tokenized_data = []
+def data_maker_bert(data):
+    '''
+    Returns a tuple containing the words with their corresponding POS-tags
+    from the UD-dataset for BERT
+    '''    
+    tokenizer = BertTokenizer.from_pretrained('bert-base-cased', do_basic_tokenize=False)
+    
     for sentence, tags in data:
-        sentence = " ".join([word for word in sentence])
-        tokenized_text = ['[CLS]']+tokenizer.tokenize(sentence)+['[SEP]']
-        # print(len(tokenized_text), len(['<PAD>']+tags+['<PAD>']))
-        tokenized_data.append(tokenized_text)
-
-    for sent, (og_sent, tags) in zip(tokenized_data, data):
-
-
-
-def to_bert2(data):
-    #WHAT TO DO WITH [SEP]?????????????????????????????????????????????????????
-    # Load pre-trained model tokenizer (vocabulary)
-    tokenizer = BasicTokenizer.from_pretrained('bert-base-cased')
-    # Tokenized input
-    #text = "[CLS] Who was Jim Henson ? [SEP] Jim Henson was a puppeteer [SEP]"
-    #tokenized_text = tokenizer.tokenize(text)
-    tokenized_data = []
-    for sentence, tags in data:
-        sentence = " ".join([word for word in sentence])
-        tokenized_text = ['[CLS]']+tokenizer.tokenize(sentence)+['[SEP]']
-        # print(len(tokenized_text), len(['<PAD>']+tags+['<PAD>']))
-        tokenized_data.append(tokenized_text)
-
-
-
-
+        tok_sentence = []
+        corrected_tags = []
+        for word, tag in zip(sentence, tags):
+            tokenized_text = tokenizer.tokenize(word)
+            if len(tokenized_text) > 1:
+                tok_sentence.append([tokenized_text[0]])
+                corrected_tags.append(tag)
+                for i in range(1, len(tokenized_text)):
+                    tok_sentence.append([tokenized_text[i]])
+                    corrected_tags.append('[IGNORE]')
+            else:
+                tok_sentence.append(tokenized_text)
+                corrected_tags.append(tag)
+        yield (['[CLS]']+tok_sentence+['[SEP]'], ['<PAD>']+corrected_tags+['<PAD>'])
 
 
 def to_elmo(sentences):
@@ -194,6 +181,6 @@ if __name__ == "__main__":
     else:
         # data_maker(args.input)
         training_data = data_completinator(args.input)
-        to_bert2(training_data)
+        to_bert(training_data)
         #elmo_embeddings = ""# = to_elmo(training_data[0])
         #main(training_data, elmo_embeddings)

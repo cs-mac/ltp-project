@@ -50,6 +50,29 @@ def conllu_reader(file_path):
             yield (sentence, pos_tags)
 
 
+def data_maker_bert(data):
+    '''
+    Transform data using BERT Wordpieces, and the [CLS], [SEP] and [IGNORE] tags
+    '''    
+    tokenizer = BertTokenizer.from_pretrained('bert-base-cased', do_basic_tokenize=False)
+    
+    for sentence, tags in data:
+        tok_sentence = []
+        corrected_tags = []
+        for word, tag in zip(sentence, tags):
+            tokenized_text = tokenizer.tokenize(word)
+            if len(tokenized_text) > 1:
+                tok_sentence.append([tokenized_text[0]])
+                corrected_tags.append(tag)
+                for i in range(1, len(tokenized_text)):
+                    tok_sentence.append([tokenized_text[i]])
+                    corrected_tags.append('[IGNORE]')
+            else:
+                tok_sentence.append(tokenized_text)
+                corrected_tags.append(tag)
+        yield (['[CLS]']+tok_sentence+['[SEP]'], ['<PAD>']+corrected_tags+['<PAD>'])
+
+
 class UniversalDependenciesDataset(Dataset):
     def __init__(self, root_path, train_file, embeds=None, cache_data=False):
         self.sent_tokens = []
