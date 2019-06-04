@@ -15,6 +15,12 @@ from typing import Iterator, List, Dict, Tuple, Iterable
 from allennlp.modules.elmo import Elmo, batch_to_ids
 from itertools import chain
 
+from pytorch_pretrained_bert import BertTokenizer, BertModel, BertForMaskedLM, BasicTokenizer, WordpieceTokenizer
+
+# OPTIONAL: if you want to have more information on what's happening, activate the logger as follows
+import logging
+logging.basicConfig(level=logging.INFO)
+
 torch.manual_seed(673)
 
 def parse_arguments():
@@ -53,6 +59,43 @@ def data_completinator(file):
     for given input
     '''
     return chain(data_maker(file))
+
+
+def to_bert(data):
+    #WHAT TO DO WITH [SEP]?????????????????????????????????????????????????????
+    # Load pre-trained model tokenizer (vocabulary)
+    tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
+    # Tokenized input
+    #text = "[CLS] Who was Jim Henson ? [SEP] Jim Henson was a puppeteer [SEP]"
+    #tokenized_text = tokenizer.tokenize(text)
+    tokenized_data = []
+    for sentence, tags in data:
+        sentence = " ".join([word for word in sentence])
+        tokenized_text = ['[CLS]']+tokenizer.tokenize(sentence)+['[SEP]']
+        # print(len(tokenized_text), len(['<PAD>']+tags+['<PAD>']))
+        tokenized_data.append(tokenized_text)
+
+    for sent, (og_sent, tags) in zip(tokenized_data, data):
+
+
+
+def to_bert2(data):
+    #WHAT TO DO WITH [SEP]?????????????????????????????????????????????????????
+    # Load pre-trained model tokenizer (vocabulary)
+    tokenizer = BasicTokenizer.from_pretrained('bert-base-cased')
+    # Tokenized input
+    #text = "[CLS] Who was Jim Henson ? [SEP] Jim Henson was a puppeteer [SEP]"
+    #tokenized_text = tokenizer.tokenize(text)
+    tokenized_data = []
+    for sentence, tags in data:
+        sentence = " ".join([word for word in sentence])
+        tokenized_text = ['[CLS]']+tokenizer.tokenize(sentence)+['[SEP]']
+        # print(len(tokenized_text), len(['<PAD>']+tags+['<PAD>']))
+        tokenized_data.append(tokenized_text)
+
+
+
+
 
 
 def to_elmo(sentences):
@@ -151,7 +194,6 @@ if __name__ == "__main__":
     else:
         # data_maker(args.input)
         training_data = data_completinator(args.input)
-        for tuple in training_data:
-            print(tuple)
+        to_bert2(training_data)
         #elmo_embeddings = ""# = to_elmo(training_data[0])
         #main(training_data, elmo_embeddings)
