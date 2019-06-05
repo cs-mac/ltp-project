@@ -17,15 +17,16 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 
 from allennlp.modules.elmo import Elmo, batch_to_ids
-from pytorch_pretrained_bert import BertTokenizer
+from pytorch_pretrained_bert import BertTokenizer, BertModel
 
 torch.manual_seed(673)
 
 
 ELMO_OPTIONS_FILE = 'https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json'
 ELMO_WEIGHT_FILE = 'https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5'
-ELMO_BATCH_SIZE = 64
 
+ELMO_BATCH_SIZE = 64
+BERT_BATCH_SIZE = 16
 
 def lazy_parse(text):
     '''
@@ -51,13 +52,13 @@ def conllu_reader(file_path):
             yield (sentence, pos_tags)
 
 
-def retokenize_bert(sent_tokens, sent_tags):
+def retokenize_bert(sents, og_tags):
     '''
     Transform data using BERT Wordpieces, and [CLS], [SEP] tags
     '''
-    tokenizer = BertTokenizer.from_pretrained('bert-large-cased', do_basic_tokenize=False, do_lower_case=False)
-
-    for sentence, tags in zip(sent_tokens, sent_tags):
+    new_sent_ids, new_sent_tokens, new_tags = [], [], []
+    tokenizer = BertTokenizer.from_pretrained('bert-base-cased', do_basic_tokenize=False, do_lower_case=False)
+    for sentence, tags in zip(sents, og_tags):
         tok_sentence = []
         corrected_tags = []
         for word, tag in zip(sentence, tags):
@@ -69,9 +70,14 @@ def retokenize_bert(sent_tokens, sent_tags):
                     tok_sentence.append(tokenized_text[i])
                     corrected_tags.append('<PAD>')
             else:
-                tok_sentence.extend(tokenized_text)
+                tok_sentence.append(''.join(tokenized_text))
                 corrected_tags.append(tag)
-        yield (['[CLS]']+tok_sentence+['[SEP]'], ['<PAD>']+corrected_tags+['<PAD>'])
+        indexed_tokens = tokenizer.convert_tokens_to_ids(['[CLS]']+tok_sentence+['[SEP]'])
+
+        new_sent_ids.append(indexed_tokens)
+        new_sent_tokens.append(tok_sentence)
+        new_tags.append(corrected_tags)
+    return new_sent_tokens, new_tags, new_sent_ids
 
 
 class UniversalDependenciesDataset(Dataset):
@@ -176,23 +182,30 @@ class UniversalDependenciesDataset(Dataset):
 
         print(' > ELMo embeddings are calculated for all {} sentences'.format(len(char_ids)))
 
-        self.word_tensor = torch.cat(sent_embeds).detach()
-        self.sent_lengths = torch.cat(sent_lengths).detach()
+        self.word_tensor = torch.cat(sent_embeds)
+        self.sent_lengths = torch.cat(sent_lengths)
 
     def _word_embed_bert(self):
-        print(':: Retokenizing words using WordPiece tokenization')
-        sent_tokens, sent_tags = [], []
-        for tokens, tags in retokenize_bert(self.sent_tokens, self.sent_tags):
-            sent_tokens.append(tokens)
-            sent_tags.append(tags)
-        self.sent_tokens = sent_tokens
-        self.sent_tags = sent_tags
+        print(':: Retokenizing and encoding tokens')
+        self.sent_tokens, self.sent_tags, token_ids = retokenize_bert(self.sent_tokens, self.sent_tags)
+        token_tensor = pad_sequence([torch.tensor(sent) for sent in token_ids], batch_first=True)
+
+        print(':: Initializing BERT')
+        bert = BertModel.from_pretrained('bert-base-cased')
 
         print(':: Calculating BERT embeddings')
-        print(' > Not implemented yet')
-        exit(0)
-        # self.word_tensor =
-        # self.sent_lengths =
+        all_sent_embeds = []
+        for i in range(0, len(token_tensor), BERT_BATCH_SIZE):
+            print(' > {}/{} [{}%]'.format(i, len(token_tensor), int(i / len(token_tensor) * 100)), end='\r')
+
+            with torch.no_grad():
+                bert_batch = token_tensor[i:i+BERT_BATCH_SIZE]
+                encoded_layers, _ = bert(bert_batch)
+                encoded_layer = encoded_layers[-1][:, 1:-1]
+            all_sent_embeds.append(encoded_layer)
+
+        self.word_tensor = torch.cat(all_sent_embeds)
+        self.sent_lengths = torch.tensor([len(sent) for sent in token_ids])
 
     def _prepare_char_tensor(self):
         def normalize(t):
@@ -490,6 +503,8 @@ def main():
         with torch.set_grad_enabled(False):
             for batch_i, batch in enumerate(test_dataloader):
                 y_pred, y_true = run_batch(model, batch)
+
+                # train_dataset.tag_set[5]
 
                 test_total += y_true.nelement()
                 test_correct += (y_true == y_pred.max(dim=1)[1]).sum().item()

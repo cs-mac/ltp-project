@@ -24,7 +24,9 @@ torch.manual_seed(673)
 
 ELMO_OPTIONS_FILE = 'https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json'
 ELMO_WEIGHT_FILE = 'https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5'
+
 ELMO_BATCH_SIZE = 64
+BERT_BATCH_SIZE = 16
 
 
 def lazy_parse(text):
@@ -55,7 +57,8 @@ def data_maker_bert(sents, og_tags):
     '''
     Transform data using BERT Wordpieces, and [CLS], [SEP] tags
     '''
-    tokenizer = BertTokenizer.from_pretrained('bert-large-cased', do_basic_tokenize=False)
+    new_sents, new_tags = [], []
+    tokenizer = BertTokenizer.from_pretrained('bert-base-cased', do_basic_tokenize=False, do_lower_case=False)
     for sentence, tags in zip(sents, og_tags):
         tok_sentence = []
         corrected_tags = []
@@ -71,7 +74,10 @@ def data_maker_bert(sents, og_tags):
                 tok_sentence.append(''.join(tokenized_text))
                 corrected_tags.append(tag)
         indexed_tokens = tokenizer.convert_tokens_to_ids(['[CLS]']+tok_sentence+['[SEP]'])
-        yield (indexed_tokens, ['<PAD>']+corrected_tags+['<PAD>'])
+
+        new_sents.append(indexed_tokens)
+        new_tags.append(corrected_tags)
+    return new_sents, new_tags
 
 
 class UniversalDependenciesDataset(Dataset):
@@ -87,8 +93,6 @@ class UniversalDependenciesDataset(Dataset):
 
         if not self._load_cached_data(cache_data, train_file, embeds):
             self._read_conllu(os.path.join(root_path, train_file))
-            if embeds == 'bert':
-                self._data_bert()
             self._prepare_embeds(embeds)
 
         self._cache_data(cache_data, train_file, embeds)
@@ -146,19 +150,6 @@ class UniversalDependenciesDataset(Dataset):
                 if tag not in self.tag_set:
                     self.tag_set.append(tag)
 
-    def _data_bert(self):
-        for token_ids, tags in data_maker_bert(self.sent_tokens, self.sent_tags):
-            print(token_ids, "\n", tags, "\n")
-            #self.sent_tokens.append(token_ids)
-            #self.sent_tags.append(tags)
-
-            # for token in token_ids:
-            #     if token not in self.token_set:
-            #         self.token_set.append(token)
-            # for tag in tags:
-            #     if tag not in self.tag_set:
-            #         self.tag_set.append(tag)
-
     def _prepare_embeds(self, embeds):
         if embeds is None:
             return
@@ -169,11 +160,11 @@ class UniversalDependenciesDataset(Dataset):
         print('Unknown embedding type: {}'.format(embeds))
 
     def _embed_elmo(self):
-        print(':: Initializing ELMo')
-        elmo = Elmo(ELMO_OPTIONS_FILE, ELMO_WEIGHT_FILE, 1, dropout=0)
-
         print(':: Encoding tokens')
         char_ids = batch_to_ids(self.sent_tokens)
+
+        print(':: Initializing ELMo')
+        elmo = Elmo(ELMO_OPTIONS_FILE, ELMO_WEIGHT_FILE, 1, dropout=0)
 
         print(':: Calculating ELMo embeddings')
         all_sent_embeds = []
@@ -191,13 +182,31 @@ class UniversalDependenciesDataset(Dataset):
         self.sent_embeds = torch.cat(all_sent_embeds)
         self.sent_lengths = torch.cat(all_sent_lengths)
 
-    def _embed_bert(self):  # TODO BERT Embeddings
-        print(':: Initializing BERT')
-        bert = BertModel.from_pretrained("bert-large-cased")
+    def _embed_bert(self):
+        print(':: Retokenizing and encoding tokens')
+        self.sent_tokens, self.sent_tags = data_maker_bert(self.sent_tokens, self.sent_tags)
+        token_tensor = pad_sequence([torch.tensor(sent) for sent in self.sent_tokens], batch_first=True)
 
-        print(':: Encoding tokens')
+        print(':: Initializing BERT')
+        bert = BertModel.from_pretrained('bert-base-cased')
+
+        print(':: Calculating BERT embeddings')
+        all_sent_embeds = []
+        for i in range(0, len(token_tensor), BERT_BATCH_SIZE):
+            print(' > {}/{} [{}%]'.format(i, len(token_tensor), int(i / len(token_tensor) * 100)), end='\r')
+
+            with torch.no_grad():
+                bert_batch = token_tensor[i:i+BERT_BATCH_SIZE]
+                encoded_layers, _ = bert(bert_batch)
+                encoded_layer = encoded_layers[-1][:, 1:-1]
+
+            all_sent_embeds.append(encoded_layer)
+
+        self.sent_embeds = torch.cat(all_sent_embeds)
+        self.sent_lengths = torch.tensor([len(sent) for sent in self.sent_tokens])
+
         # iets x 1024
-        #results = torch.zeros((len(self.), bert.config.hidden_size)).long()
+        # results = torch.zeros((len(self.), bert.config.hidden_size)).long()
 
     def _cache_data(self, cache_data, filename, embeds):
         if not cache_data:
