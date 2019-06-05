@@ -26,7 +26,8 @@ ELMO_OPTIONS_FILE = 'https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4
 ELMO_WEIGHT_FILE = 'https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5'
 
 ELMO_BATCH_SIZE = 64
-BERT_BATCH_SIZE = 16
+BERT_BATCH_SIZE = 32
+
 
 def lazy_parse(text):
     '''
@@ -72,11 +73,12 @@ def retokenize_bert(sents, og_tags):
             else:
                 tok_sentence.append(''.join(tokenized_text))
                 corrected_tags.append(tag)
+
         indexed_tokens = tokenizer.convert_tokens_to_ids(['[CLS]']+tok_sentence+['[SEP]'])
 
-        new_sent_ids.append(indexed_tokens)
         new_sent_tokens.append(tok_sentence)
         new_tags.append(corrected_tags)
+        new_sent_ids.append(indexed_tokens)
     return new_sent_tokens, new_tags, new_sent_ids
 
 
@@ -188,6 +190,10 @@ class UniversalDependenciesDataset(Dataset):
     def _word_embed_bert(self):
         print(':: Retokenizing and encoding tokens')
         self.sent_tokens, self.sent_tags, token_ids = retokenize_bert(self.sent_tokens, self.sent_tags)
+        self.sent_lengths = torch.tensor([len(sent) for sent in self.sent_tokens])
+        self.token_set = list(set([t for sent in self.sent_tokens for t in sent]))
+        self.token_to_ix = self._create_value_map(self.token_set)
+
         token_tensor = pad_sequence([torch.tensor(sent) for sent in token_ids], batch_first=True)
 
         print(':: Initializing BERT')
@@ -202,10 +208,10 @@ class UniversalDependenciesDataset(Dataset):
                 bert_batch = token_tensor[i:i+BERT_BATCH_SIZE]
                 encoded_layers, _ = bert(bert_batch)
                 encoded_layer = encoded_layers[-1][:, 1:-1]
+
             all_sent_embeds.append(encoded_layer)
 
         self.word_tensor = torch.cat(all_sent_embeds)
-        self.sent_lengths = torch.tensor([len(sent) for sent in token_ids])
 
     def _prepare_char_tensor(self):
         def normalize(t):
@@ -297,20 +303,19 @@ class BiLSTMTagger(nn.Module):
     # https://pytorch.org/tutorials/beginner/nlp/advanced_tutorial.html#sphx-glr-beginner-nlp-advanced-tutorial-py
     # https://towardsdatascience.com/taming-lstms-variable-sized-mini-batches-and-why-pytorch-is-good-for-your-health-61d35642972e
 
-    def __init__(self, w_in_dim, c_in_dim, out_dim,
-                 w_emb_dim=128, c_emb_dim=100, hidden_dim=100, c_hidden_dim=100):
+    def __init__(self, w_in_dim, c_in_dim, out_dim, w_emb_dim, c_emb_dim, w_dropout, c_dropout, noise,
+                 hidden_dim=100, c_hidden_dim=100):  # TODO Add use_word_features, use_char_features booleans
         super(BiLSTMTagger, self).__init__()
 
-        self.hidden_dim = hidden_dim
-
-        self.c_emb_dim = c_emb_dim
-        self.c_hidden_dim = c_hidden_dim
+        self.noise = noise
 
         # Word embedding
         self.word_embeds = nn.Embedding(w_in_dim, w_emb_dim)
+        self.word_dropout = nn.Dropout(w_dropout)
 
         # Char embedding
         self.char_embeds = nn.Embedding(c_in_dim, c_emb_dim)
+        self.char_dropout = nn.Dropout(c_dropout)
         self.char_bilstm = nn.LSTM(c_emb_dim, c_hidden_dim, num_layers=1,
                                    batch_first=True, bidirectional=True)
 
@@ -320,8 +325,11 @@ class BiLSTMTagger(nn.Module):
         self.out = nn.Linear(hidden_dim * 2, out_dim)
         self.softmax = nn.LogSoftmax(dim=1)
 
-    def _embed_chars(self, X_chars, word_lengths):  # (batch_size, num_words) -> (batch_size, num_words, char_emb_dim)
+    def _embed_chars(self, X_chars, word_lengths, is_training):
         X_chars = self.char_embeds(X_chars)
+
+        if is_training:
+            X_chars = self.char_dropout(X_chars)
 
         # Flatten batch and sentence dimensions
         X_chars = X_chars.view(-1, *X_chars.size()[2:])
@@ -342,7 +350,7 @@ class BiLSTMTagger(nn.Module):
         X_chars = X_chars.view(*word_lengths.size(), X_chars.size()[-1])
         return X_chars
 
-    def forward(self, X_words, X_chars, sent_lengths, word_lengths):
+    def forward(self, X_words, X_chars, sent_lengths, word_lengths, is_training=True):
         assert X_words.size()[:2] == X_chars.size()[:2]
         assert X_words.size()[0] == sent_lengths.size()[0]
         assert X_chars.size()[:2] == word_lengths.size()[:2]
@@ -350,14 +358,26 @@ class BiLSTMTagger(nn.Module):
         # Embed words if they are not embedded yet
         if len(X_words.size()) == 2:
             X_words = self.word_embeds(X_words)
+        else:
+            X_words.requires_grad_(False)
+
+        if is_training:
+            X_words = self.word_dropout(X_words)
 
         # Embed characters
-        X_chars = self._embed_chars(X_chars, word_lengths)
+        X_chars = self._embed_chars(X_chars, word_lengths, is_training)
 
+        # Concatenate Word & Char embeddings
         assert len(X_words.size()) == 3
         assert len(X_chars.size()) == 3
-
         X = torch.cat((X_words, X_chars), dim=2)
+
+        # Add noise during training
+        if is_training:
+            X_noise = torch.zeros(*X.size()).normal_(std=self.noise).detach()
+            X = X + X * X_noise
+
+        # Predict POS tags
         packed_X = pack_padded_sequence(X, sent_lengths, batch_first=True, enforce_sorted=False)
         packed_X, _ = self.bilstm(packed_X)
         X, _ = pad_packed_sequence(packed_X, batch_first=True)
@@ -366,7 +386,7 @@ class BiLSTMTagger(nn.Module):
         return self.softmax(X)
 
 
-def run_batch(model, batch):
+def run_batch(model, batch, is_training=True):
     X_words, X_chars, sent_lengths, word_lengths, y_tags = batch
     batch_mask = y_tags.sum(dim=0).gt(0)
 
@@ -376,7 +396,7 @@ def run_batch(model, batch):
     y_mask = y_tags.gt(0)
 
     # Predict output
-    y_pred = model(X_words, X_chars, sent_lengths, word_lengths)
+    y_pred = model(X_words, X_chars, sent_lengths, word_lengths, is_training)
     return y_pred[y_mask], y_tags[y_mask]
 
 
@@ -422,7 +442,7 @@ def train_model(model, train_dataset, valid_dataset=None, batch_size=16, epochs=
         if valid_dataset:
             with torch.set_grad_enabled(False):
                 for batch_i, batch in enumerate(valid_dataloader):
-                    y_pred, y_true = run_batch(model, batch)
+                    y_pred, y_true = run_batch(model, batch, is_training=False)
 
                     valid_total += y_true.nelement()
                     valid_correct += (y_true == y_pred.max(dim=1)[1]).sum().item()
@@ -451,6 +471,19 @@ def summarize_dataset(datatype, dataset):
     })
 
 
+def summarize_training_args(args, w_emb_size):
+    print_data('Model training options', {
+        'Word embeddings  ': args.embeds.upper() if args.embeds else 'Not pre-trained',
+        'Word emb size    ': w_emb_size,
+        'Char emb size    ': args.char_embed_size,
+        'word dropout rate': args.word_dropout,
+        'char dropout rate': args.char_dropout,
+        'gaussian noise   ': args.noise,
+        '# epochs         ': args.epochs,
+        'batch size       ': args.batch,
+    })
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--path', default='ud-treebanks-v2.4/UD_English-ParTUT', help='Path to the conllu files')
@@ -458,18 +491,18 @@ def main():
                         help='training data in conllu format')
     parser.add_argument('--dev', default='en_partut-ud-dev.conllu', help='validation data in conllu format')
     parser.add_argument('--test', default='en_partut-ud-test.conllu', help='test data in conllu format')
-    parser.add_argument('--embeds', help='Type of embeddings to use. Choose from [elmo, bert]')
     parser.add_argument('--cache', default=True, help='Cache processed data that is used to train the model')
+    parser.add_argument('--embeds', help='Type of pre-trained embeddings to use. Choose from [elmo, bert]')
+    parser.add_argument(
+        '--word-embed-size', help='word embedding size, only used when not using pre-trained embeddings',
+        type=int, default=256)
+    parser.add_argument('--char-embed-size', help='char embedding size', type=int, default=100)
     parser.add_argument('--epochs', help='number of epochs to train', type=int, default=20)
     parser.add_argument('--batch', help='batch size', type=int, default=16)
+    parser.add_argument('--word-dropout', help='word dropout rate', type=float, default=0.25)
+    parser.add_argument('--char-dropout', help='char dropout rate', type=float, default=0.0)
+    parser.add_argument('--noise', help='sigma of Gaussian noise', type=float, default=0.2)
     args = parser.parse_args()
-
-    if args.embeds == 'elmo':
-        print('Using ELMo embeddings\n')
-    elif args.embeds == 'bert':
-        print('Using BERT embeddings\n')
-    else:
-        print('Not using pre-trained embeddings\n')
 
     print('# Loading training data')
     train_dataset, valid_dataset, test_dataset = None, None, None
@@ -484,10 +517,18 @@ def main():
         summarize_dataset('Validation', valid_dataset)
 
     print('# Training model')
+    w_emb_size = train_dataset.get_embed_dim(args.word_embed_size)
+    summarize_training_args(args, w_emb_size)
+
     model = BiLSTMTagger(len(train_dataset.token_set),
                          len(train_dataset.char_set),
                          len(train_dataset.tag_set),
-                         w_emb_dim=train_dataset.get_embed_dim(128))
+                         w_emb_dim=w_emb_size,
+                         c_emb_dim=args.char_embed_size,
+                         w_dropout=args.word_dropout,
+                         c_dropout=args.char_dropout,
+                         noise=args.noise,
+                         )
 
     train_model(model, train_dataset, valid_dataset, batch_size=args.batch, epochs=args.epochs)
 
@@ -502,7 +543,7 @@ def main():
         test_total, test_correct = 0, 0
         with torch.set_grad_enabled(False):
             for batch_i, batch in enumerate(test_dataloader):
-                y_pred, y_true = run_batch(model, batch)
+                y_pred, y_true = run_batch(model, batch, is_training=False)
 
                 # train_dataset.tag_set[5]
 
