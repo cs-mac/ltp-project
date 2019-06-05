@@ -19,6 +19,11 @@ from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_se
 from allennlp.modules.elmo import Elmo, batch_to_ids
 from pytorch_pretrained_bert import BertTokenizer, BertModel
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
+from sklearn.utils.multiclass import unique_labels
+
 torch.manual_seed(673)
 
 
@@ -484,6 +489,22 @@ def summarize_training_args(args, w_emb_size):
     })
 
 
+def create_confusion_matrix(y_true, y_pred, show=False):
+    if show:    
+        cm = confusion_matrix(y_true, y_pred)
+        plt.figure(figsize=(20,10))
+        ax= plt.subplot()
+        sns.heatmap(cm, cmap="Blues", annot=False, ax=ax)
+        ax.set_xlabel('Predicted labels')
+        ax.set_ylabel('True labels')
+        ax.set_title('Confusion Matrix POS-Tags')
+        labels = unique_labels(y_true, y_pred)
+        ax.xaxis.set_ticklabels(labels)
+        ax.yaxis.set_ticklabels(labels)
+        plt.yticks(rotation=0) 
+        plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--path', default='ud-treebanks-v2.4/UD_English-ParTUT', help='Path to the conllu files')
@@ -541,15 +562,21 @@ def main():
         print('# Testing model')
         test_dataloader = DataLoader(test_dataset, batch_size=args.batch)
         test_total, test_correct = 0, 0
+        y_pred_tot, y_true_tot = [], []
         with torch.set_grad_enabled(False):
             for batch_i, batch in enumerate(test_dataloader):
                 y_pred, y_true = run_batch(model, batch, is_training=False)
 
-                # train_dataset.tag_set[5]
+                y_pred_tot.append(y_pred)
+                y_true_tot.append(y_true)                
 
                 test_total += y_true.nelement()
                 test_correct += (y_true == y_pred.max(dim=1)[1]).sum().item()
             print(' > Test accuracy: {:.4f}'.format(test_correct / test_total))
+
+            y_true_tags = [train_dataset.tag_set[tns_val.item()] for tns_val in torch.cat(y_true_tot)]
+            y_pred_tags = [train_dataset.tag_set[tns_val.item()] for tns_val in torch.cat([y_pred.max(dim=1)[1] for y_pred in y_pred_tot])]
+            create_confusion_matrix(y_true_tags, y_pred_tags, True)
 
 
 if __name__ == '__main__':
