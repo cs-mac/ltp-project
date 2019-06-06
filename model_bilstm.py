@@ -21,7 +21,8 @@ from pytorch_pretrained_bert import BertTokenizer, BertModel
 
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix
+import numpy as np
+from sklearn.metrics import confusion_matrix, classification_report
 from sklearn.utils.multiclass import unique_labels
 
 torch.manual_seed(673)
@@ -489,9 +490,11 @@ def summarize_training_args(args, w_emb_size):
     })
 
 
-def create_confusion_matrix(y_true, y_pred, show=False):
+def create_confusion_matrix(y_true, y_pred, show=False, normalize=False):
     if show:    
         cm = confusion_matrix(y_true, y_pred)
+        if normalize:
+            cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
         plt.figure(figsize=(20,10))
         ax= plt.subplot()
         sns.heatmap(cm, cmap="Blues", annot=False, ax=ax)
@@ -572,11 +575,11 @@ def main():
 
                 test_total += y_true.nelement()
                 test_correct += (y_true == y_pred.max(dim=1)[1]).sum().item()
-            print(' > Test accuracy: {:.4f}'.format(test_correct / test_total))
-
+            # print(' > Test accuracy: {:.4f}'.format(test_correct / test_total))
             y_true_tags = [train_dataset.tag_set[tns_val.item()] for tns_val in torch.cat(y_true_tot)]
             y_pred_tags = [train_dataset.tag_set[tns_val.item()] for tns_val in torch.cat([y_pred.max(dim=1)[1] for y_pred in y_pred_tot])]
-            create_confusion_matrix(y_true_tags, y_pred_tags, True)
+            create_confusion_matrix(y_true_tags, y_pred_tags, True, True)
+            print(classification_report(y_true_tags, y_pred_tags))
 
 
 if __name__ == '__main__':
