@@ -1,8 +1,3 @@
-"""
-This baseline model is based on:
-https://pytorch.org/tutorials/beginner/nlp/sequence_models_tutorial.html#example-an-lstm-for-part-of-speech-tagging
-"""
-
 import os
 import pickle
 import argparse
@@ -16,20 +11,18 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 
+import gensim.downloader
 from allennlp.modules.elmo import Elmo, batch_to_ids
 from pytorch_pretrained_bert import BertTokenizer, BertModel
 
 import matplotlib.pyplot as plt
-import seaborn as sns
 import numpy as np
 from sklearn.metrics import confusion_matrix, classification_report
 from sklearn.utils.multiclass import unique_labels
 
-torch.manual_seed(673)
-
-
-ELMO_OPTIONS_FILE = 'https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json'
-ELMO_WEIGHT_FILE = 'https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5'
+ELMO_URL = 'https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/'
+ELMO_OPTIONS_FILE = ELMO_URL + 'elmo_2x4096_512_2048cnn_2xhighway_options.json'
+ELMO_WEIGHT_FILE = ELMO_URL + 'elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5'
 
 ELMO_BATCH_SIZE = 64
 BERT_BATCH_SIZE = 32
@@ -89,10 +82,11 @@ def retokenize_bert(sents, og_tags):
 
 
 class UniversalDependenciesDataset(Dataset):
-    def __init__(self, root_path, filename, idx_map=None, embeds=None, cache_data=False):
+    def __init__(self, root_path, filename, idx_map=None, embeds=None, use_wordpiece=False, cache_data=False):
         self.filename = filename
         self.filepath = os.path.join(root_path, filename)
         self.embeds = embeds
+        self.use_wordpiece = use_wordpiece
         self.cache = cache_data
 
         self.sent_tokens = []
@@ -159,15 +153,43 @@ class UniversalDependenciesDataset(Dataset):
     def _prepare_word_tensor(self):
         if not self.embeds:
             return self._word_embed_idx()
+        if self.embeds == 'w2v':
+            return self._word_embed_gensim()
         if self.embeds == 'elmo':
             return self._word_embed_elmo()
         if self.embeds == 'bert':
             return self._word_embed_bert()
         print('Unknown embedding type: {}'.format(self.embeds))
+        exit(-1)
+
+    def _retokenize_wordpiece(self):
+        print(':: Retokenizing and encoding tokens')
+        self.sent_tokens, self.sent_tags, token_ids = retokenize_bert(self.sent_tokens, self.sent_tags)
+        self.sent_lengths = torch.tensor([len(sent) for sent in self.sent_tokens])
+        self.token_set = list(set([t for sent in self.sent_tokens for t in sent]))
+        self.token_to_ix = self._create_value_map(self.token_set)
+
+        return token_ids
 
     def _word_embed_idx(self):
+        if self.use_wordpiece:
+            self._retokenize_wordpiece()
+
         sent_tensors = [torch.tensor([self.token_to_ix[t] if t in self.token_to_ix else 0 for t in sent])
                         for sent in self.sent_tokens]
+        self.word_tensor = pad_sequence(sent_tensors, batch_first=True)
+        self.sent_lengths = torch.tensor([len(sent) for sent in self.sent_tokens])
+
+    def _word_embed_gensim(self):
+        print(':: Initializing Gensim')
+        model = gensim.downloader.load('word2vec-google-news-300')
+
+        def token_to_wv(t):
+            return torch.from_numpy(model.wv[t]) if t in model.wv else torch.zeros(300)
+
+        print(':: Calculating Word2vec embeddings')
+        sent_tensors = [torch.stack([token_to_wv(t) for t in sent]) for sent in self.sent_tokens]
+
         self.word_tensor = pad_sequence(sent_tensors, batch_first=True)
         self.sent_lengths = torch.tensor([len(sent) for sent in self.sent_tokens])
 
@@ -194,12 +216,7 @@ class UniversalDependenciesDataset(Dataset):
         self.sent_lengths = torch.cat(sent_lengths)
 
     def _word_embed_bert(self):
-        print(':: Retokenizing and encoding tokens')
-        self.sent_tokens, self.sent_tags, token_ids = retokenize_bert(self.sent_tokens, self.sent_tags)
-        self.sent_lengths = torch.tensor([len(sent) for sent in self.sent_tokens])
-        self.token_set = list(set([t for sent in self.sent_tokens for t in sent]))
-        self.token_to_ix = self._create_value_map(self.token_set)
-
+        token_ids = self._retokenize_wordpiece()
         token_tensor = pad_sequence([torch.tensor(sent) for sent in token_ids], batch_first=True)
 
         print(':: Initializing BERT')
@@ -256,6 +273,8 @@ class UniversalDependenciesDataset(Dataset):
         filepath = os.path.join('data', self.filename)
         if self.embeds:
             filepath += '.' + self.embeds
+        elif self.use_wordpiece:
+            filepath += '.wordpiece'
         return filepath + '.pickle'
 
     def _cache_data(self):
@@ -306,27 +325,34 @@ class UniversalDependenciesDataset(Dataset):
 
 
 class BiLSTMTagger(nn.Module):
-    # https://pytorch.org/tutorials/beginner/nlp/advanced_tutorial.html#sphx-glr-beginner-nlp-advanced-tutorial-py
-    # https://towardsdatascience.com/taming-lstms-variable-sized-mini-batches-and-why-pytorch-is-good-for-your-health-61d35642972e
-
     def __init__(self, w_in_dim, c_in_dim, out_dim, w_emb_dim, c_emb_dim, w_dropout, c_dropout, noise,
-                 hidden_dim=100, c_hidden_dim=100):  # TODO Add use_word_features, use_char_features booleans
+                 hidden_dim=100, c_hidden_dim=100, use_chars=True, use_words=True):
         super(BiLSTMTagger, self).__init__()
+
+        assert use_chars or use_words
+        self.use_chars = use_chars
+        self.use_words = use_words
 
         self.noise = noise
 
-        # Word embedding
-        self.word_embeds = nn.Embedding(w_in_dim, w_emb_dim)
-        self.word_dropout = nn.Dropout(w_dropout)
+        # Char features
+        if use_chars:
+            self.char_embeds = nn.Embedding(c_in_dim, c_emb_dim)
+            self.char_dropout = nn.Dropout(c_dropout)
+            self.char_bilstm = nn.LSTM(c_emb_dim, c_hidden_dim, num_layers=1,
+                                       batch_first=True, bidirectional=True)
+        else:
+            c_emb_dim = 0
 
-        # Char embedding
-        self.char_embeds = nn.Embedding(c_in_dim, c_emb_dim)
-        self.char_dropout = nn.Dropout(c_dropout)
-        self.char_bilstm = nn.LSTM(c_emb_dim, c_hidden_dim, num_layers=1,
-                                   batch_first=True, bidirectional=True)
+        # Word features
+        if use_words:
+            self.word_embeds = nn.Embedding(w_in_dim, w_emb_dim)
+            self.word_dropout = nn.Dropout(w_dropout)
+        else:
+            w_emb_dim = 0
 
         # Network
-        self.bilstm = nn.LSTM(w_emb_dim + 2 * c_emb_dim, hidden_dim, num_layers=1,
+        self.bilstm = nn.LSTM(2 * c_emb_dim + w_emb_dim, hidden_dim, num_layers=1,
                               batch_first=True, bidirectional=True)
         self.out = nn.Linear(hidden_dim * 2, out_dim)
         self.softmax = nn.LogSoftmax(dim=1)
@@ -361,22 +387,26 @@ class BiLSTMTagger(nn.Module):
         assert X_words.size()[0] == sent_lengths.size()[0]
         assert X_chars.size()[:2] == word_lengths.size()[:2]
 
-        # Embed words if they are not embedded yet
-        if len(X_words.size()) == 2:
-            X_words = self.word_embeds(X_words)
-        else:
-            X_words.requires_grad_(False)
+        if self.use_chars:
+            # Embed characters
+            X_chars = self._embed_chars(X_chars, word_lengths, is_training)
 
-        if is_training:
-            X_words = self.word_dropout(X_words)
+        if self.use_words:
+            # Embed words if they are not embedded yet
+            if len(X_words.size()) == 2:
+                X_words = self.word_embeds(X_words)
+            else:
+                X_words.requires_grad_(False)
 
-        # Embed characters
-        X_chars = self._embed_chars(X_chars, word_lengths, is_training)
+            if is_training:
+                X_words = self.word_dropout(X_words)
 
-        # Concatenate Word & Char embeddings
-        assert len(X_words.size()) == 3
-        assert len(X_chars.size()) == 3
-        X = torch.cat((X_words, X_chars), dim=2)
+        if self.use_chars and self.use_words:
+            X = torch.cat((X_chars, X_words), dim=2)
+        elif self.use_chars:
+            X = X_chars
+        elif self.use_words:
+            X = X_words
 
         # Add noise during training
         if is_training:
@@ -394,10 +424,10 @@ class BiLSTMTagger(nn.Module):
 
 def run_batch(model, batch, is_training=True):
     X_words, X_chars, sent_lengths, word_lengths, y_tags = batch
-    batch_mask = y_tags.sum(dim=0).gt(0)
+    max_len = sent_lengths.max()
 
     X_words, X_chars, word_lengths, y_tags = \
-        X_words[:, batch_mask], X_chars[:, batch_mask], word_lengths[:, batch_mask], y_tags[:, batch_mask]
+        X_words[:, :max_len], X_chars[:, :max_len], word_lengths[:, :max_len], y_tags[:, :max_len]
 
     y_mask = y_tags.gt(0)
 
@@ -406,13 +436,13 @@ def run_batch(model, batch, is_training=True):
     return y_pred[y_mask], y_tags[y_mask]
 
 
-def train_model(model, train_dataset, valid_dataset=None, batch_size=16, epochs=10):
+def train_model(model, train_dataset, valid_dataset=None, lr=0.1, momentum=0.9, batch_size=16, epochs=10):
     train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=batch_size)
     if valid_dataset:
         valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size)
 
     loss_function = nn.NLLLoss()
-    optimizer = optim.SGD(model.parameters(), lr=0.1)
+    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=momentum)
 
     print(':: Starting training')
     verbose_interval = max(1, len(train_dataloader) // 50)
@@ -464,7 +494,10 @@ def train_model(model, train_dataset, valid_dataset=None, batch_size=16, epochs=
 def print_data(name, data):
     print('\n### {} ###'.format(name))
     for key, val in data.items():
-        print(' > {} {}'.format(key, val))
+        if key[0] == ' ':
+            print('   - {} {}'.format(key.lstrip(), val))
+        else:
+            print(' > {}  {}'.format(key, val))
     print('')
 
 
@@ -478,25 +511,44 @@ def summarize_dataset(datatype, dataset):
 
 
 def summarize_training_args(args, w_emb_size):
-    print_data('Model training options', {
-        'Word embeddings  ': args.embeds.upper() if args.embeds else 'Not pre-trained',
-        'Word emb size    ': w_emb_size,
-        'Char emb size    ': args.char_embed_size,
-        'word dropout rate': args.word_dropout,
-        'char dropout rate': args.char_dropout,
-        'gaussian noise   ': args.noise,
-        '# epochs         ': args.epochs,
-        'batch size       ': args.batch,
-    })
+    data = {}
+    if args.no_chars:
+        data['Char features      '] = 'no'
+    else:
+        data['Char features      '] = ''
+        data[' Char Emb size     '] = args.char_embed_size
+        data[' Char Dropout rate '] = args.char_dropout
+
+    if args.no_words:
+        data['Word Features      '] = 'no'
+    else:
+        data['Word Features      '] = ''
+        data[' Word Embeddings   '] = args.embeds.upper() if args.embeds else 'Not pre-trained'
+        use_wordpiece = args.embeds == 'bert' or (not args.embeds and args.wordpiece)
+        data[' Tokenization      '] = 'WordPiece' if use_wordpiece else 'From data'
+        data[' Word Emb size     '] = w_emb_size
+        data[' Word Dropout rate '] = args.word_dropout
+
+    data['Learning parameters'] = ''
+    data[' Learning rate     '] = args.lr
+    data[' Momentum          '] = args.momentum
+    data[' Gaussian noise    '] = args.noise
+    data[' # epochs          '] = args.epochs
+    data[' Batch size        '] = args.batch
+    data[' Random seed       '] = args.seed
+
+    print_data('Model parameters', data)
 
 
 def create_confusion_matrix(y_true, y_pred, show=False, normalize=False):
-    if show:    
+    import seaborn as sns
+
+    if show:
         cm = confusion_matrix(y_true, y_pred)
         if normalize:
             cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-        plt.figure(figsize=(20,10))
-        ax= plt.subplot()
+        plt.figure(figsize=(20, 10))
+        ax = plt.subplot()
         sns.heatmap(cm, cmap="Blues", annot=False, ax=ax)
         ax.set_xlabel('Predicted labels')
         ax.set_ylabel('True labels')
@@ -504,7 +556,7 @@ def create_confusion_matrix(y_true, y_pred, show=False, normalize=False):
         labels = unique_labels(y_true, y_pred)
         ax.xaxis.set_ticklabels(labels)
         ax.yaxis.set_ticklabels(labels)
-        plt.yticks(rotation=0) 
+        plt.yticks(rotation=0)
         plt.show()
 
 
@@ -515,34 +567,46 @@ def main():
                         help='training data in conllu format')
     parser.add_argument('--dev', default='en_partut-ud-dev.conllu', help='validation data in conllu format')
     parser.add_argument('--test', default='en_partut-ud-test.conllu', help='test data in conllu format')
-    parser.add_argument('--cache', default=True, help='Cache processed data that is used to train the model')
-    parser.add_argument('--embeds', help='Type of pre-trained embeddings to use. Choose from [elmo, bert]')
+    parser.add_argument('--no-chars', action='store_true', help='Disable character features')
+    parser.add_argument('--no-words', action='store_true', help='Disable word features')
+    parser.add_argument('--no-cache', action='store_true', help='Cache processed data that is used to train the model')
+    parser.add_argument('--embeds', help='Type of pre-trained embeddings to use. Choose from [w2v, elmo, bert]')
     parser.add_argument(
         '--word-embed-size', help='word embedding size, only used when not using pre-trained embeddings',
-        type=int, default=256)
+        type=int, default=300)
+    parser.add_argument('--wordpiece', action='store_true',
+                        help='Use WordPiece tokenization. Only affects models without word embeddings.')
     parser.add_argument('--char-embed-size', help='char embedding size', type=int, default=100)
+    parser.add_argument('--lr', help='learning rate', type=float, default=0.1)
+    parser.add_argument('--momentum', help='learning rate', type=float, default=0.9)
     parser.add_argument('--epochs', help='number of epochs to train', type=int, default=20)
-    parser.add_argument('--batch', help='batch size', type=int, default=16)
+    parser.add_argument('--batch', help='batch size', type=int, default=4)
     parser.add_argument('--word-dropout', help='word dropout rate', type=float, default=0.25)
     parser.add_argument('--char-dropout', help='char dropout rate', type=float, default=0.0)
     parser.add_argument('--noise', help='sigma of Gaussian noise', type=float, default=0.2)
+    parser.add_argument('--seed', help='random seed', type=int, default=673)
+    parser.add_argument('--show-cm', action='store_true', help='Show confusion matrix of test results')
     args = parser.parse_args()
 
     print('# Loading training data')
     train_dataset, valid_dataset, test_dataset = None, None, None
 
-    train_dataset = UniversalDependenciesDataset(args.path, args.train, embeds=args.embeds, cache_data=args.cache)
+    train_dataset = UniversalDependenciesDataset(
+        args.path, args.train, embeds=args.embeds, use_wordpiece=args.wordpiece, cache_data=not args.no_cache)
     summarize_dataset('Train', train_dataset)
 
     if args.dev:
         print('# Loading validation data')
         valid_dataset = UniversalDependenciesDataset(args.path, args.dev, idx_map=train_dataset.get_idx_map(),
-                                                     embeds=args.embeds, cache_data=args.cache)
+                                                     embeds=args.embeds, use_wordpiece=args.wordpiece,
+                                                     cache_data=not args.no_cache)
         summarize_dataset('Validation', valid_dataset)
 
     print('# Training model')
     w_emb_size = train_dataset.get_embed_dim(args.word_embed_size)
     summarize_training_args(args, w_emb_size)
+
+    torch.manual_seed(args.seed)
 
     model = BiLSTMTagger(len(train_dataset.token_set),
                          len(train_dataset.char_set),
@@ -552,14 +616,18 @@ def main():
                          w_dropout=args.word_dropout,
                          c_dropout=args.char_dropout,
                          noise=args.noise,
+                         use_chars=not args.no_chars,
+                         use_words=not args.no_words,
                          )
 
-    train_model(model, train_dataset, valid_dataset, batch_size=args.batch, epochs=args.epochs)
+    train_model(model, train_dataset, valid_dataset, lr=args.lr,
+                momentum=args.momentum, batch_size=args.batch, epochs=args.epochs)
 
     if args.test:
         print('# Loading testing data')
         test_dataset = UniversalDependenciesDataset(args.path, args.test, idx_map=train_dataset.get_idx_map(),
-                                                    embeds=args.embeds, cache_data=args.cache)
+                                                    embeds=args.embeds, use_wordpiece=args.wordpiece,
+                                                    cache_data=not args.no_cache)
         summarize_dataset('Test', test_dataset)
 
         print('# Testing model')
@@ -571,14 +639,15 @@ def main():
                 y_pred, y_true = run_batch(model, batch, is_training=False)
 
                 y_pred_tot.append(y_pred)
-                y_true_tot.append(y_true)                
+                y_true_tot.append(y_true)
 
                 test_total += y_true.nelement()
                 test_correct += (y_true == y_pred.max(dim=1)[1]).sum().item()
             # print(' > Test accuracy: {:.4f}'.format(test_correct / test_total))
             y_true_tags = [train_dataset.tag_set[tns_val.item()] for tns_val in torch.cat(y_true_tot)]
-            y_pred_tags = [train_dataset.tag_set[tns_val.item()] for tns_val in torch.cat([y_pred.max(dim=1)[1] for y_pred in y_pred_tot])]
-            create_confusion_matrix(y_true_tags, y_pred_tags, True, True)
+            y_pred_tags = [train_dataset.tag_set[tns_val.item()]
+                           for tns_val in torch.cat([y_pred.max(dim=1)[1] for y_pred in y_pred_tot])]
+            create_confusion_matrix(y_true_tags, y_pred_tags, args.show_cm, True)
             print(classification_report(y_true_tags, y_pred_tags))
 
 
