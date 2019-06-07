@@ -27,6 +27,7 @@ ELMO_WEIGHT_FILE = ELMO_URL + 'elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5'
 ELMO_BATCH_SIZE = 64
 BERT_BATCH_SIZE = 32
 
+CONLLU_FIELDS = ('id', 'form', 'lemma', 'upostag', 'xpostag', 'feats', 'head', 'deprel', 'deps', 'misc')
 
 def lazy_parse(text):
     '''
@@ -34,7 +35,7 @@ def lazy_parse(text):
     '''
     for sentence in text.split("\n\n"):
         if sentence:
-            yield [conllu.parser.parse_line(line)
+            yield [conllu.parser.parse_line(line, fields=CONLLU_FIELDS)
                    for line in sentence.split("\n")
                    if line and not line.strip().startswith("#")]
 
