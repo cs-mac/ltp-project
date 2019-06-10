@@ -29,6 +29,7 @@ BERT_BATCH_SIZE = 32
 
 CONLLU_FIELDS = ('id', 'form', 'lemma', 'upostag', 'xpostag', 'feats', 'head', 'deprel', 'deps', 'misc')
 
+
 def lazy_parse(text):
     '''
     Parses a conllu file
@@ -211,10 +212,18 @@ class UniversalDependenciesDataset(Dataset):
             sent_embeds.append(sent_batch_embeds['elmo_representations'][0])
             sent_lengths.append(sent_batch_embeds['mask'].sum(dim=1))
 
-        print(' > ELMo embeddings are calculated for all {} sentences'.format(len(char_ids)))
+            if len(sent_embeds) >= 8:
+                if self.word_tensor is not None:
+                    sent_embeds = [self.word_tensor] + sent_embeds
+                    sent_lengths = [self.sent_lengths] + sent_lengths
 
-        self.word_tensor = torch.cat(sent_embeds)
-        self.sent_lengths = torch.cat(sent_lengths)
+                self.word_tensor = torch.cat(sent_embeds)
+                self.sent_lengths = torch.cat(sent_lengths)
+                sent_embeds, sent_lengths = [], []
+
+        self.word_tensor = torch.cat([self.word_tensor] + sent_embeds)
+        self.sent_lengths = torch.cat([self.sent_lengths] + sent_lengths)
+        print(' > ELMo embeddings are calculated for all {} sentences'.format(len(char_ids)))
 
     def _word_embed_bert(self):
         token_ids = self._retokenize_wordpiece()
@@ -224,18 +233,24 @@ class UniversalDependenciesDataset(Dataset):
         bert = BertModel.from_pretrained('bert-base-cased')
 
         print(':: Calculating BERT embeddings')
-        all_sent_embeds = []
+        sent_embeds = []
         for i in range(0, len(token_tensor), BERT_BATCH_SIZE):
             print(' > {}/{} [{}%]'.format(i, len(token_tensor), int(i / len(token_tensor) * 100)), end='\r')
 
             with torch.no_grad():
                 bert_batch = token_tensor[i:i+BERT_BATCH_SIZE]
                 encoded_layers, _ = bert(bert_batch)
-                encoded_layer = encoded_layers[-1][:, 1:-1]
+                sent_embeds.append(encoded_layers[-1][:, 1:-1])
 
-            all_sent_embeds.append(encoded_layer)
+            if len(sent_embeds) >= 8:
+                if self.word_tensor is not None:
+                    sent_embeds = [self.word_tensor] + sent_embeds
 
-        self.word_tensor = torch.cat(all_sent_embeds)
+                self.word_tensor = torch.cat(sent_embeds)
+                sent_embeds = []
+
+        self.word_tensor = torch.cat([self.word_tensor] + sent_embeds)
+        print(' > BERT embeddings are calculated for all {} sentences'.format(len(token_tensor)))
 
     def _prepare_char_tensor(self):
         def normalize(t):
@@ -268,10 +283,11 @@ class UniversalDependenciesDataset(Dataset):
         self.tag_tensor = pad_sequence(sent_tensors, batch_first=True)
 
     def _get_cache_path(self):
-        if not os.path.isdir('data'):
-            os.mkdir('data')
+        cache_dir = 'data'
+        if not os.path.isdir(cache_dir):
+            os.mkdir(cache_dir)
 
-        filepath = os.path.join('data', self.filename)
+        filepath = os.path.join(cache_dir, self.filename)
         if self.embeds:
             filepath += '.' + self.embeds
         elif self.use_wordpiece:
@@ -282,21 +298,25 @@ class UniversalDependenciesDataset(Dataset):
         if not self.cache:
             return False
 
+        data = pickle.dumps({
+            'token_set': self.token_set,
+            'char_set': self.char_set,
+            'tag_set': self.tag_set,
+
+            'sent_tokens': self.sent_tokens,
+            'sent_tags': self.sent_tags,
+
+            'word_tensor': self.word_tensor,
+            'char_tensor': self.char_tensor,
+            'tag_tensor': self.tag_tensor,
+            'sent_lengths': self.sent_lengths,
+            'word_lengths': self.word_lengths,
+        }, protocol=4)
+        max_bytes = 2**31 - 1
+
         with open(self._get_cache_path(), 'wb') as f:
-            pickle.dump({
-                'token_set': self.token_set,
-                'char_set': self.char_set,
-                'tag_set': self.tag_set,
-
-                'sent_tokens': self.sent_tokens,
-                'sent_tags': self.sent_tags,
-
-                'word_tensor': self.word_tensor,
-                'char_tensor': self.char_tensor,
-                'tag_tensor': self.tag_tensor,
-                'sent_lengths': self.sent_lengths,
-                'word_lengths': self.word_lengths,
-            }, f)
+            for i in range(0, len(data), max_bytes):
+                f.write(data[i:i+max_bytes])
 
     def _load_cached_data(self):
         if not self.cache:
@@ -306,20 +326,27 @@ class UniversalDependenciesDataset(Dataset):
         if not os.path.isfile(cache_path):
             return False
 
+        max_bytes = 2**31 - 1
+        file_size = os.path.getsize(cache_path)
+
+        data = bytearray(0)
         with open(cache_path, 'rb') as f:
-            data = pickle.load(f)
-            self.token_set = data['token_set']
-            self.char_set = data['char_set']
-            self.tag_set = data['tag_set']
+            for _ in range(0, file_size, max_bytes):
+                data += f.read(max_bytes)
+        data = pickle.loads(data)
 
-            self.sent_tokens = data['sent_tokens']
-            self.sent_tags = data['sent_tags']
+        self.token_set = data['token_set']
+        self.char_set = data['char_set']
+        self.tag_set = data['tag_set']
 
-            self.word_tensor = data['word_tensor']
-            self.char_tensor = data['char_tensor']
-            self.tag_tensor = data['tag_tensor']
-            self.sent_lengths = data['sent_lengths']
-            self.word_lengths = data['word_lengths']
+        self.sent_tokens = data['sent_tokens']
+        self.sent_tags = data['sent_tags']
+
+        self.word_tensor = data['word_tensor']
+        self.char_tensor = data['char_tensor']
+        self.tag_tensor = data['tag_tensor']
+        self.sent_lengths = data['sent_lengths']
+        self.word_lengths = data['word_lengths']
 
         print(':: Loaded cached data from {}'.format(cache_path))
         return True
@@ -397,7 +424,7 @@ class BiLSTMTagger(nn.Module):
             if len(X_words.size()) == 2:
                 X_words = self.word_embeds(X_words)
             else:
-                X_words.requires_grad_(False)
+                X_words = X_words.detach()
 
             if is_training:
                 X_words = self.word_dropout(X_words)
@@ -581,9 +608,9 @@ def main():
     parser.add_argument('--lr', help='learning rate', type=float, default=0.1)
     parser.add_argument('--momentum', help='learning rate', type=float, default=0.9)
     parser.add_argument('--epochs', help='number of epochs to train', type=int, default=20)
-    parser.add_argument('--batch', help='batch size', type=int, default=4)
+    parser.add_argument('--batch', help='batch size', type=int, default=16)
     parser.add_argument('--word-dropout', help='word dropout rate', type=float, default=0.25)
-    parser.add_argument('--char-dropout', help='char dropout rate', type=float, default=0.0)
+    parser.add_argument('--char-dropout', help='char dropout rate', type=float, default=0.1)
     parser.add_argument('--noise', help='sigma of Gaussian noise', type=float, default=0.2)
     parser.add_argument('--seed', help='random seed', type=int, default=673)
     parser.add_argument('--show-cm', action='store_true', help='Show confusion matrix of test results')
