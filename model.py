@@ -365,6 +365,10 @@ class UniversalDependenciesDataset(Dataset):
 
 
 class BiLSTMTagger(nn.Module):
+    """
+    Initial version of this model is based on https://pytorch.org/tutorials/beginner/nlp/sequence_models_tutorial.html#example-an-lstm-for-part-of-speech-tagging
+    """
+
     def __init__(self, w_in_dim, c_in_dim, out_dim, w_emb_dim, c_emb_dim, w_dropout, c_dropout, noise,
                  hidden_dim=100, c_hidden_dim=100, use_chars=True, use_words=True):
         super(BiLSTMTagger, self).__init__()
