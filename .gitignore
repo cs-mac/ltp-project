@@ -3,7 +3,7 @@
 Pipfile
 Pipfile.lock
 data
-created_model
+results*
 
 # Downloaded dependencies
 ud-treebanks-v2.4
